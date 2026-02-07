@@ -1,6 +1,5 @@
 -- RobloxUILibrary.lua
--- 高度なメソッドチェーン型UI Library
--- ゲーム用・個人利用・画像ベース特殊形状対応
+-- 完全修正版：型安全性・メモリ管理・環境依存解消
 
 local UILibrary = {}
 UILibrary.__index = UILibrary
@@ -50,21 +49,27 @@ end
 
 function ThemeManager:SetTheme(themeName)
     if not self.Themes[themeName] then
-        error("テーマ '" .. themeName .. "' が見つかりません")
+        warn("テーマ '" .. themeName .. "' が見つかりません")
         return
     end
     
     self.ActiveTheme = themeName
     
-    -- すべてのリスナーに通知
-    for _, listener in ipairs(self.Listeners) do
-        listener(self:GetCurrent())
+    -- すべてのリスナーに通知（安全な反復処理）
+    for i = #self.Listeners, 1, -1 do
+        local success, err = pcall(function()
+            self.Listeners[i](self:GetCurrent())
+        end)
+        if not success then
+            warn("テーマ更新エラー:", err)
+            table.remove(self.Listeners, i)
+        end
     end
 end
 
 function ThemeManager:RegisterTheme(name, themeData)
     if not name or type(themeData) ~= "table" then
-        error("無効なテーマ定義です")
+        warn("無効なテーマ定義です")
         return
     end
     
@@ -73,6 +78,15 @@ end
 
 function ThemeManager:OnThemeChange(callback)
     table.insert(self.Listeners, callback)
+    return callback
+end
+
+function ThemeManager:RemoveListener(callback)
+    for i = #self.Listeners, 1, -1 do
+        if self.Listeners[i] == callback then
+            table.remove(self.Listeners, i)
+        end
+    end
 end
 
 --[[ ============================================
@@ -82,6 +96,10 @@ end
 local Utility = {}
 
 function Utility.Tween(instance, properties, duration, easingStyle, easingDirection)
+    if not instance or not instance.Parent then
+        return nil
+    end
+    
     local TweenService = game:GetService("TweenService")
     local tweenInfo = TweenInfo.new(
         duration or 0.3,
@@ -95,7 +113,7 @@ end
 
 function Utility.ClampPosition(position, size, containerSize)
     local x = math.clamp(position.X, 0, containerSize.X - size.X)
-    local y = math.clamp(position.Y, 0, containerSize.Y - 30) -- タイトルバー30px分は必ず見える
+    local y = math.clamp(position.Y, 0, containerSize.Y - 30)
     return Vector2.new(x, y)
 end
 
@@ -115,7 +133,9 @@ end
 
 function BaseElement:_registerThemeListener()
     self._themeUpdateCallback = function(theme)
-        self:_applyTheme(theme)
+        if self._instance and self._instance.Parent then
+            self:_applyTheme(theme)
+        end
     end
     ThemeManager:OnThemeChange(self._themeUpdateCallback)
 end
@@ -125,6 +145,13 @@ function BaseElement:_applyTheme(theme)
 end
 
 function BaseElement:Destroy()
+    -- リスナー解除（メモリリーク防止）
+    if self._themeUpdateCallback then
+        ThemeManager:RemoveListener(self._themeUpdateCallback)
+        self._themeUpdateCallback = nil
+    end
+    
+    -- インスタンス破棄
     if self._instance then
         self._instance:Destroy()
         self._instance = nil
@@ -151,6 +178,7 @@ function Button.new(text)
     self._borderColor = nil
     self._borderThickness = 2
     self._backgroundImage = nil
+    self._baseSize = UDim2.new(0, 200, 0, 50)
     
     self:_registerThemeListener()
     
@@ -185,11 +213,13 @@ function Button:Create(parent)
     
     -- 角丸
     local corner = Instance.new("UICorner")
+    corner.Name = "Corner"
     corner.CornerRadius = self._cornerRadius
     corner.Parent = button
     
     -- 枠線
     local border = Instance.new("UIStroke")
+    border.Name = "Border"
     border.Color = self._borderColor or theme.Border
     border.Thickness = self._borderThickness
     border.Transparency = self._transparency
@@ -208,24 +238,27 @@ function Button:Create(parent)
     textLabel.TextXAlignment = Enum.TextXAlignment.Center
     textLabel.Parent = button
     
+    -- 基準サイズを保存
+    self._baseSize = self._size
+    
     -- ホバーエフェクト
     button.MouseEnter:Connect(function()
         Utility.Tween(button, {BackgroundTransparency = self._transparency + 0.1}, 0.2)
-        Utility.Tween(button, {Size = self._size + UDim2.new(0, 5, 0, 2)}, 0.2, Enum.EasingStyle.Back)
+        Utility.Tween(button, {Size = self._baseSize + UDim2.new(0, 5, 0, 2)}, 0.2, Enum.EasingStyle.Back)
     end)
     
     button.MouseLeave:Connect(function()
         Utility.Tween(button, {BackgroundTransparency = self._transparency + theme.Transparency}, 0.2)
-        Utility.Tween(button, {Size = self._size}, 0.2, Enum.EasingStyle.Back)
+        Utility.Tween(button, {Size = self._baseSize}, 0.2, Enum.EasingStyle.Back)
     end)
     
     -- クリックエフェクト
     button.MouseButton1Down:Connect(function()
-        Utility.Tween(button, {Size = self._size - UDim2.new(0, 5, 0, 2)}, 0.1)
+        Utility.Tween(button, {Size = self._baseSize - UDim2.new(0, 3, 0, 1)}, 0.1)
     end)
     
     button.MouseButton1Up:Connect(function()
-        Utility.Tween(button, {Size = self._size}, 0.1)
+        Utility.Tween(button, {Size = self._baseSize}, 0.1)
     end)
     
     -- クリックイベント
@@ -249,6 +282,7 @@ end
 
 function Button:Size(width, height)
     self._size = UDim2.new(0, width, 0, height)
+    self._baseSize = self._size
     if self._instance then
         self._instance.Size = self._size
     end
@@ -298,13 +332,13 @@ function Button:BackgroundImage(assetId)
 end
 
 function Button:_applyTheme(theme)
-    if not self._instance then return end
+    if not self._instance or not self._instance.Parent then return end
     
     if not self._color then
         self._instance.BackgroundColor3 = theme.Accent
     end
     
-    local border = self._instance:FindFirstChild("UIStroke")
+    local border = self._instance:FindFirstChild("Border")
     if border and not self._borderColor then
         border.Color = theme.Border
     end
@@ -333,7 +367,8 @@ function Window.new(title)
     self._dragging = false
     self._resizing = false
     self._dragStart = nil
-    self._startPos = nil
+    self._dragStartPos = nil
+    self._resizeStartSize = nil
     self._minimized = false
     self._maximized = false
     self._savedSize = nil
@@ -341,6 +376,7 @@ function Window.new(title)
     self._backgroundImage = nil
     self._backgroundColor = nil
     self._transparency = 0
+    self._inputConnections = {}
     
     self:_registerThemeListener()
     
@@ -375,11 +411,13 @@ function Window:Create(parent)
     
     -- 角丸
     local corner = Instance.new("UICorner")
+    corner.Name = "Corner"
     corner.CornerRadius = UDim.new(0, 12)
     corner.Parent = window
     
     -- 枠線
     local border = Instance.new("UIStroke")
+    border.Name = "Border"
     border.Color = theme.Border
     border.Thickness = 2
     border.Transparency = 0
@@ -395,8 +433,19 @@ function Window:Create(parent)
     titleBar.Parent = window
     
     local titleCorner = Instance.new("UICorner")
+    titleCorner.Name = "TitleCorner"
     titleCorner.CornerRadius = UDim.new(0, 12)
     titleCorner.Parent = titleBar
+    
+    -- タイトルバー下部を隠すためのフレーム
+    local titleBarBottom = Instance.new("Frame")
+    titleBarBottom.Name = "TitleBarBottom"
+    titleBarBottom.Size = UDim2.new(1, 0, 0, 12)
+    titleBarBottom.Position = UDim2.new(0, 0, 1, -12)
+    titleBarBottom.BackgroundColor3 = theme.Foreground
+    titleBarBottom.BackgroundTransparency = self._transparency
+    titleBarBottom.BorderSizePixel = 0
+    titleBarBottom.Parent = titleBar
     
     -- タイトルテキスト
     local titleLabel = Instance.new("TextLabel")
@@ -426,13 +475,16 @@ function Window:Create(parent)
     minimizeBtn.Position = UDim2.new(1, -95, 0, 5)
     minimizeBtn.BackgroundColor3 = theme.Foreground
     minimizeBtn.BackgroundTransparency = 0.3
+    minimizeBtn.BorderSizePixel = 0
     minimizeBtn.Text = "─"
     minimizeBtn.TextColor3 = theme.Text
     minimizeBtn.TextSize = 16
     minimizeBtn.Font = Enum.Font.GothamBold
+    minimizeBtn.AutoButtonColor = false
     minimizeBtn.Parent = titleBar
     
     local minCorner = Instance.new("UICorner")
+    minCorner.Name = "Corner"
     minCorner.CornerRadius = UDim.new(0, 6)
     minCorner.Parent = minimizeBtn
     
@@ -443,13 +495,16 @@ function Window:Create(parent)
     maximizeBtn.Position = UDim2.new(1, -60, 0, 5)
     maximizeBtn.BackgroundColor3 = theme.Foreground
     maximizeBtn.BackgroundTransparency = 0.3
+    maximizeBtn.BorderSizePixel = 0
     maximizeBtn.Text = "□"
     maximizeBtn.TextColor3 = theme.Text
     maximizeBtn.TextSize = 16
     maximizeBtn.Font = Enum.Font.GothamBold
+    maximizeBtn.AutoButtonColor = false
     maximizeBtn.Parent = titleBar
     
     local maxCorner = Instance.new("UICorner")
+    maxCorner.Name = "Corner"
     maxCorner.CornerRadius = UDim.new(0, 6)
     maxCorner.Parent = maximizeBtn
     
@@ -460,13 +515,16 @@ function Window:Create(parent)
     closeBtn.Position = UDim2.new(1, -25, 0, 5)
     closeBtn.BackgroundColor3 = theme.Error
     closeBtn.BackgroundTransparency = 0.3
+    closeBtn.BorderSizePixel = 0
     closeBtn.Text = "×"
     closeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
     closeBtn.TextSize = 20
     closeBtn.Font = Enum.Font.GothamBold
+    closeBtn.AutoButtonColor = false
     closeBtn.Parent = titleBar
     
     local closeCorner = Instance.new("UICorner")
+    closeCorner.Name = "Corner"
     closeCorner.CornerRadius = UDim.new(0, 6)
     closeCorner.Parent = closeBtn
     
@@ -481,26 +539,27 @@ function Window:Create(parent)
     resizeHandle.Parent = window
     
     local resizeCorner = Instance.new("UICorner")
+    resizeCorner.Name = "Corner"
     resizeCorner.CornerRadius = UDim.new(0, 4)
     resizeCorner.Parent = resizeHandle
     
     -- ドラッグ機能
-    titleBar.InputBegan:Connect(function(input)
+    local dragConnection1 = titleBar.InputBegan:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
             self._dragging = true
             self._dragStart = input.Position
-            self._startPos = window.Position
+            self._dragStartPos = window.Position
         end
     end)
     
-    UserInputService.InputChanged:Connect(function(input)
+    local dragConnection2 = UserInputService.InputChanged:Connect(function(input)
         if self._dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
             local delta = input.Position - self._dragStart
             local newPosition = UDim2.new(
-                self._startPos.X.Scale,
-                self._startPos.X.Offset + delta.X,
-                self._startPos.Y.Scale,
-                self._startPos.Y.Offset + delta.Y
+                self._dragStartPos.X.Scale,
+                self._dragStartPos.X.Offset + delta.X,
+                self._dragStartPos.Y.Scale,
+                self._dragStartPos.Y.Offset + delta.Y
             )
             
             -- 画面内制約
@@ -519,12 +578,12 @@ function Window:Create(parent)
         if self._resizing and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
             local delta = input.Position - self._dragStart
             local newWidth = math.clamp(
-                self._startPos.X + delta.X,
+                self._resizeStartSize.X + delta.X,
                 self._minSize.X,
                 self._maxSize.X
             )
             local newHeight = math.clamp(
-                self._startPos.Y + delta.Y,
+                self._resizeStartSize.Y + delta.Y,
                 self._minSize.Y,
                 self._maxSize.Y
             )
@@ -533,7 +592,7 @@ function Window:Create(parent)
         end
     end)
     
-    UserInputService.InputEnded:Connect(function(input)
+    local dragConnection3 = UserInputService.InputEnded:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
             self._dragging = false
             self._resizing = false
@@ -541,13 +600,19 @@ function Window:Create(parent)
     end)
     
     -- リサイズハンドルイベント
-    resizeHandle.InputBegan:Connect(function(input)
+    local resizeConnection = resizeHandle.InputBegan:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
             self._resizing = true
             self._dragStart = input.Position
-            self._startPos = Vector2.new(window.AbsoluteSize.X, window.AbsoluteSize.Y)
+            self._resizeStartSize = Vector2.new(window.AbsoluteSize.X, window.AbsoluteSize.Y)
         end
     end)
+    
+    -- 接続を保存（破棄時に解除）
+    table.insert(self._inputConnections, dragConnection1)
+    table.insert(self._inputConnections, dragConnection2)
+    table.insert(self._inputConnections, dragConnection3)
+    table.insert(self._inputConnections, resizeConnection)
     
     -- 最小化機能
     minimizeBtn.MouseButton1Click:Connect(function()
@@ -562,8 +627,8 @@ function Window:Create(parent)
     -- 閉じる機能
     closeBtn.MouseButton1Click:Connect(function()
         Utility.Tween(window, {Size = UDim2.new(0, 0, 0, 0)}, 0.3, Enum.EasingStyle.Back, Enum.EasingDirection.In)
-        wait(0.3)
-        window:Destroy()
+        task.wait(0.3)
+        self:Destroy()
     end)
     
     -- フェードイン
@@ -667,7 +732,7 @@ function Window:GetContent()
 end
 
 function Window:_applyTheme(theme)
-    if not self._instance then return end
+    if not self._instance or not self._instance.Parent then return end
     
     if not self._backgroundColor then
         self._instance.BackgroundColor3 = theme.Background
@@ -677,16 +742,32 @@ function Window:_applyTheme(theme)
     if titleBar then
         titleBar.BackgroundColor3 = theme.Foreground
         
+        local titleBarBottom = titleBar:FindFirstChild("TitleBarBottom")
+        if titleBarBottom then
+            titleBarBottom.BackgroundColor3 = theme.Foreground
+        end
+        
         local titleLabel = titleBar:FindFirstChild("TitleLabel")
         if titleLabel then
             titleLabel.TextColor3 = theme.Text
         end
     end
     
-    local border = self._instance:FindFirstChild("UIStroke")
+    local border = self._instance:FindFirstChild("Border")
     if border then
         border.Color = theme.Border
     end
+end
+
+function Window:Destroy()
+    -- 入力接続を解除
+    for _, connection in ipairs(self._inputConnections) do
+        connection:Disconnect()
+    end
+    self._inputConnections = {}
+    
+    -- 親クラスのDestroyを呼び出し
+    BaseElement.Destroy(self)
 end
 
 --[[ ============================================
@@ -694,7 +775,12 @@ end
      ============================================ ]]
 
 function UILibrary:Init(parent)
-    self.Parent = parent or game.Players.LocalPlayer:WaitForChild("PlayerGui")
+    local Players = game:GetService("Players")
+    
+    -- 安全な親取得（LocalScript以外でも動作）
+    self.Parent = parent 
+        or (Players.LocalPlayer and Players.LocalPlayer:WaitForChild("PlayerGui"))
+        or game:GetService("StarterGui")
     
     -- メインコンテナ
     local screenGui = Instance.new("ScreenGui")
